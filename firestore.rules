@@ -1,0 +1,173 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===== ヘルパー関数 =====
+    
+    // 認証済みユーザーかチェック
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // 指定されたユーザーIDと一致するかチェック
+    function isUser(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    // 管理者権限かチェック
+    function isAdmin() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    // 同じ会社のユーザーかチェック
+    function isSameCompany(companyId) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.company_id == companyId;
+    }
+    
+    // アクティブなユーザーかチェック
+    function isActiveUser() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.is_active == true;
+    }
+
+    // ===== 会社情報 (companies) =====
+    
+    match /companies/{companyId} {
+      // 同じ会社のアクティブユーザーは読み取り可能
+      allow read: if isActiveUser() && isSameCompany(companyId);
+      
+      // 管理者のみ会社情報を更新可能
+      allow update: if isAdmin() && isSameCompany(companyId);
+      
+      // 新規会社作成は制限（管理画面からのみ）
+      allow create: if false;
+      allow delete: if false;
+    }
+
+    // ===== ユーザー情報 (users) =====
+    
+    match /users/{userId} {
+      // 自分の情報は読み取り可能
+      allow read: if isUser(userId) && isActiveUser();
+      
+      // 同じ会社の管理者は全ユーザー情報を読み取り可能
+      allow read: if isAdmin() && isActiveUser() && 
+                     isSameCompany(resource.data.company_id);
+      
+      // 自分の情報は更新可能（特定フィールドのみ）
+      allow update: if isUser(userId) && isActiveUser() &&
+                       request.resource.data.keys().hasOnly(['name', 'last_login', 'updated_at']) &&
+                       request.resource.data.company_id == resource.data.company_id &&
+                       request.resource.data.role == resource.data.role &&
+                       request.resource.data.is_active == resource.data.is_active;
+      
+      // 管理者は同じ会社のユーザー情報を更新可能
+      allow update: if isAdmin() && isActiveUser() && 
+                       isSameCompany(resource.data.company_id) &&
+                       request.resource.data.company_id == resource.data.company_id;
+      
+      // 管理者は同じ会社にユーザーを作成可能
+      allow create: if isAdmin() && isActiveUser() && 
+                       isSameCompany(request.resource.data.company_id);
+      
+      // ユーザー削除は禁止（is_activeで制御）
+      allow delete: if false;
+    }
+
+    // ===== 録音データ (recordings) =====
+    
+    match /recordings/{recordingId} {
+      // 同じ会社のアクティブユーザーのみアクセス可能
+      allow read, write: if isActiveUser() && 
+                            isSameCompany(resource.data.company_id);
+      
+      // 新規録音データ作成
+      allow create: if isActiveUser() && 
+                       isSameCompany(request.resource.data.company_id) &&
+                       request.resource.data.user_id == request.auth.uid;
+    }
+
+    // ===== 文字起こしデータ (transcripts) =====
+    
+    match /transcripts/{transcriptId} {
+      // 同じ会社のアクティブユーザーのみアクセス可能
+      allow read, write: if isActiveUser() && 
+                            isSameCompany(resource.data.company_id);
+      
+      // 新規文字起こしデータ作成
+      allow create: if isActiveUser() && 
+                       isSameCompany(request.resource.data.company_id) &&
+                       request.resource.data.user_id == request.auth.uid;
+    }
+
+    // ===== ケアプランデータ (care_plans) =====
+    
+    match /care_plans/{carePlanId} {
+      // 同じ会社のアクティブユーザーのみアクセス可能
+      allow read, write: if isActiveUser() && 
+                            isSameCompany(resource.data.company_id);
+      
+      // 新規ケアプラン作成
+      allow create: if isActiveUser() && 
+                       isSameCompany(request.resource.data.company_id) &&
+                       request.resource.data.user_id == request.auth.uid;
+    }
+
+    // ===== プロンプトテンプレート (prompt_templates) =====
+    
+    match /prompt_templates/{templateId} {
+      // システムテンプレート（is_system: true）は全ユーザーが読み取り可能
+      allow read: if isActiveUser() && resource.data.is_system == true;
+      
+      // 同じ会社のテンプレートは読み取り可能
+      allow read: if isActiveUser() && 
+                     isSameCompany(resource.data.company_id);
+      
+      // 自分が作成したテンプレートは編集可能
+      allow write: if isActiveUser() && 
+                      resource.data.user_id == request.auth.uid &&
+                      isSameCompany(resource.data.company_id);
+      
+      // 新規テンプレート作成
+      allow create: if isActiveUser() && 
+                       isSameCompany(request.resource.data.company_id) &&
+                       request.resource.data.user_id == request.auth.uid &&
+                       request.resource.data.is_system == false;
+      
+      // システムテンプレートは削除不可
+      allow delete: if isActiveUser() && 
+                       resource.data.user_id == request.auth.uid &&
+                       resource.data.is_system == false;
+    }
+
+    // ===== 利用状況ログ (usage_logs) =====
+    
+    match /usage_logs/{logId} {
+      // 自分のログのみ読み取り可能
+      allow read: if isActiveUser() && 
+                     resource.data.user_id == request.auth.uid;
+      
+      // 管理者は同じ会社の全ログを読み取り可能
+      allow read: if isAdmin() && isActiveUser() && 
+                     isSameCompany(resource.data.company_id);
+      
+      // ログの作成のみ可能（更新・削除は不可）
+      allow create: if isActiveUser() && 
+                       request.resource.data.user_id == request.auth.uid &&
+                       isSameCompany(request.resource.data.company_id);
+      
+      // ログの更新・削除は禁止
+      allow update, delete: if false;
+    }
+
+    // ===== その他のデータアクセス拒否 =====
+    
+    // 明示的に許可されていないドキュメントへのアクセスを拒否
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
